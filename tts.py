@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -94,8 +95,21 @@ def setup():
             print(f"Textgrids zip for {orth} already downloaded, unpacking ...")
         run(["unzip", "-o", str(tg_zip), "-d", str(REPO_DIR)])
 
+    try:
+        import torch  # noqa: F401
+        print("torch already installed.")
+    except ImportError:
+        print("Installing torch ...")
+        if platform.system() == "Linux" and platform.machine() not in ("x86_64", "AMD64"):
+            run([sys.executable, "-m", "pip", "install", "-q", "torch"])
+        elif platform.system() == "Linux":
+            run([sys.executable, "-m", "pip", "install", "-q", "torch",
+                 "--index-url", "https://download.pytorch.org/whl/cpu"])
+        else:
+            run([sys.executable, "-m", "pip", "install", "-q", "torch"])
+
     run([sys.executable, "-m", "pip", "install", "-q",
-         "matplotlib", "PyYAML", "g2p-en", "inflect", "pypinyin", "Unidecode", "yiddish"])
+         "scipy", "matplotlib", "PyYAML", "g2p-en", "inflect", "pypinyin", "Unidecode", "yiddish"])
     run([sys.executable, "-c",
          "import ssl, nltk; ssl._create_default_https_context = ssl._create_unverified_context; "
          "nltk.download('averaged_perceptron_tagger'); nltk.download('cmudict'); "

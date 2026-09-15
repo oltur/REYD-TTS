@@ -8,7 +8,7 @@ A console and web application for synthesising Yiddish speech, wrapping the [REY
 python3 tts.py --setup
 ```
 
-Downloads the pretrained models (~1 GB) and preprocessed data (~1.8 GB), installs Python dependencies. Run once.
+This is the **only** setup step — no need to separately clone or download anything. It clones [REYD-TTS/FastSpeech2](https://github.com/REYD-TTS/FastSpeech2) into `./FastSpeech2/` (not part of this repo — see `.gitignore`), downloads the pretrained models (~1 GB) and preprocessed data (~1.8 GB) from figshare, and installs all Python dependencies (`torch`, `scipy`, and the rest). Run once, needs a few GB of disk and a stable connection. Safe to re-run — it skips anything already present.
 
 ## Usage
 
