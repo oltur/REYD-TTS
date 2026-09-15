@@ -1,0 +1,13 @@
+# Fetched dependency + downloaded model weights — reproducible via `python3 tts.py --setup`
+FastSpeech2/
+
+# Generated audio output, not source
+*.wav
+
+# Secrets
+.cloudflared_token
+
+# OS / tooling cruft
+.DS_Store
+__pycache__/
+.claude/settings.local.json

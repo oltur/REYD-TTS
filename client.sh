@@ -1,0 +1,2 @@
+  curl -X POST "http://localhost:8080/synthesize?orth=hasidic&speaker=1" --data-binary "אַ גוטן טאָג"  --output /tmp/speech.wav && afplay /tmp/speech.wav  
+# curl -X POST http://localhost:8080/synthesize --data-binary @/Users/me/projects/_Spanish/REYD-TTS/text.txt --output /tmp/speech.wav && afplay /tmp/speech.wav  
