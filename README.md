@@ -85,3 +85,7 @@ The script installs Python (upgrading to 3.10 if needed), creates a systemd serv
 - Models: [REYD-TTS](https://github.com/REYD-TTS) by Jacob J. Webber, Samuel Lo, Isaac L. Bleaman
 - Vocoder: [HiFi-GAN](https://github.com/jik876/hifi-gan)
 - Dataset: University of Edinburgh DataShare ([19350539](https://figshare.com/articles/dataset/19350539))
+
+## License
+
+© 2026 Oleksandr Turevskiy — [turevskiy.com](https://turevskiy.com)

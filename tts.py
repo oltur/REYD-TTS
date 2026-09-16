@@ -530,6 +530,7 @@ UI_HTML = """<!DOCTYPE html>
     letter-spacing: 0.06em;
     text-align: center;
     direction: ltr;
+    line-height: 1.8;
   }
 </style>
 </head>
@@ -580,7 +581,10 @@ UI_HTML = """<!DOCTYPE html>
   </div>
 </main>
 
-<footer>REYD &mdash; Reading Electronic Yiddish Documents</footer>
+<footer>
+  REYD &mdash; Reading Electronic Yiddish Documents<br>
+  &copy; 2026 Oleksandr Turevskiy &middot; <a href="https://turevskiy.com" style="color:inherit;">turevskiy.com</a>
+</footer>
 
 <script>
 function updateShareURL() {

@@ -5,7 +5,8 @@ DEPLOY_DIR  := /home/ot/reyd-tts-deploy
 .PHONY: deploy deploy-cloudflared
 
 deploy:
-	rsync -avz --exclude='.git' --exclude='__pycache__' --exclude='.DS_Store' \
+	rsync -avz --exclude='.git' --exclude='.gitignore' --exclude='__pycache__' \
+		--exclude='.DS_Store' --exclude='.cloudflared_token' \
 		./ $(SERVER_USER)@$(SERVER_HOST):$(DEPLOY_DIR)/
 	ssh -t $(SERVER_USER)@$(SERVER_HOST) "sudo bash $(DEPLOY_DIR)/server_setup.sh"
 
