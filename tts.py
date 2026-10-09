@@ -582,7 +582,7 @@ UI_HTML = """<!DOCTYPE html>
 </main>
 
 <footer>
-  REYD &mdash; Reading Electronic Yiddish Documents<br>
+  REYD &mdash; Reading Electronic Yiddish Documents &middot; <a href="/swagger" style="color:inherit;">API docs</a><br>
   &copy; 2026 Oleksandr Turevskiy &middot; <a href="https://turevskiy.com" style="color:inherit;">turevskiy.com</a>
 </footer>
 
@@ -677,6 +677,108 @@ document.getElementById('text').addEventListener('keydown', e => {
 UI_HTML = UI_HTML.replace("__FAVICON_HREF__", FAVICON_DATA_URI)
 
 
+# ── API docs (Swagger/OpenAPI) ───────────────────────────────────────────────────
+
+OPENAPI_SPEC = {
+    "openapi": "3.0.3",
+    "info": {
+        "title": "REYD Yiddish TTS API",
+        "description": "Synthesizes Yiddish speech from text using FastSpeech2 + HiFi-GAN.",
+        "version": "1.0.0",
+    },
+    "paths": {
+        "/status": {
+            "get": {
+                "summary": "Health check",
+                "responses": {
+                    "200": {
+                        "description": "Service status and available options",
+                        "content": {"application/json": {"schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {"type": "string", "example": "ok"},
+                                "orthographies": {"type": "array", "items": {"type": "string"}},
+                                "speakers": {"type": "object"},
+                            },
+                        }}},
+                    }
+                },
+            }
+        },
+        "/synthesize": {
+            "parameters": [
+                {"name": "text", "in": "query", "required": False, "schema": {"type": "string"},
+                 "description": "Yiddish text to synthesize. Required unless sent as the POST request body."},
+                {"name": "orth", "in": "query", "required": False,
+                 "schema": {"type": "string", "enum": list(ORTHOGRAPHIES), "default": "yivo_respelled"},
+                 "description": "Orthography/transliteration scheme."},
+                {"name": "speaker", "in": "query", "required": False,
+                 "schema": {"type": "integer", "enum": list(SPEAKERS.keys()), "default": 0},
+                 "description": "0 = male Lithuanian, 1 = female Lithuanian, 2 = male Polish."},
+                {"name": "autoplay", "in": "query", "required": False,
+                 "schema": {"type": "string", "enum": ["0", "1"], "default": "0"},
+                 "description": "If 1, returns an HTML page with an autoplaying <audio> element instead of raw WAV bytes."},
+            ],
+            "get": {
+                "summary": "Synthesize speech (text via query parameter)",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "Synthesized audio (or an autoplaying HTML page if autoplay=1)",
+                        "content": {
+                            "audio/wav": {"schema": {"type": "string", "format": "binary"}},
+                            "text/html": {"schema": {"type": "string"}},
+                        },
+                    },
+                    "400": {"description": "Invalid request (missing/invalid text, orth, or speaker)"},
+                },
+            },
+            "post": {
+                "summary": "Synthesize speech (text via query parameter or plain-text request body)",
+                "parameters": [],
+                "requestBody": {
+                    "required": False,
+                    "content": {"text/plain": {"schema": {"type": "string"}, "example": "אַ גוטן טאָג"}},
+                },
+                "responses": {
+                    "200": {
+                        "description": "Synthesized audio (or an autoplaying HTML page if autoplay=1)",
+                        "content": {
+                            "audio/wav": {"schema": {"type": "string", "format": "binary"}},
+                            "text/html": {"schema": {"type": "string"}},
+                        },
+                    },
+                    "400": {"description": "Invalid request (missing/invalid text, orth, or speaker)"},
+                },
+            },
+        },
+    },
+}
+
+SWAGGER_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>REYD TTS API Docs</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.29.1/swagger-ui.css">
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.29.1/swagger-ui-bundle.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.29.1/swagger-ui-standalone-preset.js"></script>
+<script>
+  window.onload = () => {
+    SwaggerUIBundle({
+      url: '/openapi.json',
+      dom_id: '#swagger-ui',
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+    });
+  };
+</script>
+</body>
+</html>"""
+
+
 # ── web server ─────────────────────────────────────────────────────────────────
 
 def serve(default_orth: str, default_speaker: int, port: int):
@@ -711,6 +813,20 @@ def serve(default_orth: str, default_speaker: int, port: int):
                 body = FAVICON_SVG.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "image/svg+xml")
+                self.send_header("Content-Length", len(body))
+                self.end_headers()
+                self.wfile.write(body)
+            elif path == "/swagger":
+                body = SWAGGER_HTML.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", len(body))
+                self.end_headers()
+                self.wfile.write(body)
+            elif path == "/openapi.json":
+                body = json.dumps(OPENAPI_SPEC).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", len(body))
                 self.end_headers()
                 self.wfile.write(body)
