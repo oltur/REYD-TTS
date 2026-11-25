@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote
@@ -738,7 +739,7 @@ OPENAPI_SPEC = {
         "/synthesize": {
             "parameters": [
                 {"name": "text", "in": "query", "required": False, "schema": {"type": "string"},
-                 "description": "Yiddish text to synthesize. Required unless sent as the POST request body."},
+                 "description": "Yiddish text to synthesize. Required unless sent as the POST request body. Max 4096 characters."},
                 {"name": "orth", "in": "query", "required": False,
                  "schema": {"type": "string", "enum": list(ORTHOGRAPHIES), "default": "yivo_respelled"},
                  "description": "Orthography/transliteration scheme."},
@@ -761,6 +762,7 @@ OPENAPI_SPEC = {
                         },
                     },
                     "400": {"description": "Invalid request (missing/invalid text, orth, or speaker)"},
+                    "413": {"description": "Text exceeds the per-request character limit"},
                 },
             },
             "post": {
@@ -779,6 +781,7 @@ OPENAPI_SPEC = {
                         },
                     },
                     "400": {"description": "Invalid request (missing/invalid text, orth, or speaker)"},
+                    "413": {"description": "Text exceeds the per-request character limit"},
                 },
             },
         },
@@ -807,6 +810,51 @@ SWAGGER_HTML = """<!DOCTYPE html>
 </script>
 </body>
 </html>"""
+
+
+# ── synthesised-audio cache ────────────────────────────────────────────────────
+#
+# Synthesis is deterministic in (text, orth, speaker), and the UI invites
+# replaying the same phrase, so repeats are free. Bounded by total bytes rather
+# than entry count: one WAV can be several MB, so an N-entry cache has no useful
+# memory ceiling.
+
+class TextTooLong(Exception):
+    """Request text exceeds MAX_TEXT_CHARS — answered with 413, not 400."""
+
+
+MAX_TEXT_CHARS = int(os.environ.get("REYD_MAX_CHARS", 4096))
+CACHE_MAX_BYTES = int(os.environ.get("REYD_CACHE_BYTES", 64 * 1024 * 1024))
+
+_cache = OrderedDict()
+_cache_bytes = 0
+_cache_lock = threading.Lock()
+_cache_stats = {"hit": 0, "miss": 0}
+
+
+def _cache_get(key):
+    with _cache_lock:
+        wav = _cache.get(key)
+        if wav is not None:
+            _cache.move_to_end(key)
+            _cache_stats["hit"] += 1
+        else:
+            _cache_stats["miss"] += 1
+        return wav
+
+
+def _cache_put(key, wav: bytes):
+    global _cache_bytes
+    if len(wav) > CACHE_MAX_BYTES:
+        return
+    with _cache_lock:
+        if key in _cache:
+            return
+        _cache[key] = wav
+        _cache_bytes += len(wav)
+        while _cache_bytes > CACHE_MAX_BYTES:
+            _, evicted = _cache.popitem(last=False)
+            _cache_bytes -= len(evicted)
 
 
 # ── web server ─────────────────────────────────────────────────────────────────
@@ -926,10 +974,31 @@ def serve(default_orth: str, default_speaker: int, port: int):
                     raise ValueError(f"'orth' must be one of {ORTHOGRAPHIES}")
                 if speaker not in SPEAKERS:
                     raise ValueError(f"'speaker' must be 0, 1, or 2")
+                # Synthesis cost is linear in input length (~16s per 1000 chars
+                # on this hardware) and the result is buffered in memory, so an
+                # uncapped request would tie up a worker indefinitely.
+                if len(text) > MAX_TEXT_CHARS:
+                    raise TextTooLong(
+                        f"text is {len(text)} characters; the limit is "
+                        f"{MAX_TEXT_CHARS}. Split it into smaller requests."
+                    )
 
-                eng = engines[orth]
-                with synth_sem:
-                    wav_bytes = _run_synthesis(eng, text, orth, speaker)
+                key = (text, orth, speaker)
+                wav_bytes = _cache_get(key)
+                cache_state = "HIT"
+                if wav_bytes is None:
+                    cache_state = "MISS"
+                    eng = engines[orth]
+                    with synth_sem:
+                        # Another thread may have synthesised this while we
+                        # waited for a slot.
+                        wav_bytes = _cache_get(key)
+                        if wav_bytes is None:
+                            cache_state = "MISS"
+                            wav_bytes = _run_synthesis(eng, text, orth, speaker)
+                            _cache_put(key, wav_bytes)
+                        else:
+                            cache_state = "HIT"
 
                 if autoplay:
                     b64 = base64.b64encode(wav_bytes).decode("ascii")
@@ -944,8 +1013,20 @@ def serve(default_orth: str, default_speaker: int, port: int):
                     self.send_header("Content-Type", "audio/wav")
                     self.send_header("Content-Length", len(wav_bytes))
                     self.send_header("Content-Disposition", 'attachment; filename="speech.wav"')
+                    # Deterministic in (text, orth, speaker), so it is safe for
+                    # the CDN and the browser to keep.
+                    self.send_header("Cache-Control", "public, max-age=86400")
+                    self.send_header("X-Cache", cache_state)
                     self.end_headers()
                     self.wfile.write(wav_bytes)
+
+            except TextTooLong as e:
+                msg = json.dumps({"error": str(e)}).encode()
+                self.send_response(413)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", len(msg))
+                self.end_headers()
+                self.wfile.write(msg)
 
             except (ValueError, KeyError, json.JSONDecodeError) as e:
                 msg = json.dumps({"error": str(e)}).encode()
