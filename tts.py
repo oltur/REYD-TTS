@@ -24,7 +24,8 @@ import re
 import subprocess
 import sys
 import tempfile
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
@@ -159,7 +160,22 @@ def _load_engine(orth: str):
 
     model   = get_model(_Args(), configs, device, train=False)
     vocoder = get_vocoder(model_config, device)
-    return {"model": model, "vocoder": vocoder, "configs": configs, "device": device}
+    return {
+        "model": model, "vocoder": vocoder, "configs": configs, "device": device,
+        # Parsed once here rather than per request — it is read-only afterwards.
+        "lexicon": _load_lexicon(preprocess_config["path"]["lexicon_path"]),
+    }
+
+
+def _load_lexicon(lexicon_path: str) -> dict:
+    """Parse a FastSpeech2 lexicon file into {word: [phones]}."""
+    lexicon = {}
+    with open(lexicon_path) as f:
+        for line in f:
+            parts = re.split(r"\s+", line.strip())
+            if parts and parts[0].lower() not in lexicon:
+                lexicon[parts[0].lower()] = parts[1:]
+    return lexicon
 
 
 def _run_synthesis(engine: dict, text: str, orth: str, speaker_id: int) -> bytes:
@@ -180,12 +196,7 @@ def _run_synthesis(engine: dict, text: str, orth: str, speaker_id: int) -> bytes
 
     # Build phoneme sequence (Yiddish path from synthesize.py)
     lexicon_path = preprocess_config["path"]["lexicon_path"]
-    lexicon = {}
-    with open(lexicon_path) as f:
-        for line in f:
-            parts = re.split(r"\s+", line.strip())
-            if parts and parts[0].lower() not in lexicon:
-                lexicon[parts[0].lower()] = parts[1:]
+    lexicon = engine.get("lexicon") or _load_lexicon(lexicon_path)
 
     phones = []
     for w in re.split(r'([,;.\u201e\u201c"\-\?\!\(\)\s+])', processed):
@@ -782,10 +793,29 @@ SWAGGER_HTML = """<!DOCTYPE html>
 # ── web server ─────────────────────────────────────────────────────────────────
 
 def serve(default_orth: str, default_speaker: int, port: int):
+    import torch
+
+    # Requests are served concurrently, so bound both how many syntheses run at
+    # once and how many CPU threads each one may use. Letting torch fan out over
+    # every core per request just oversubscribes the box once more than one user
+    # shows up.
+    max_workers = max(1, min(4, (os.cpu_count() or 4) // 4))
+    torch.set_num_threads(max(1, (os.cpu_count() or 4) // max_workers))
+    synth_sem = threading.Semaphore(max_workers)
+
     ensure_textgrids(default_orth)
-    print(f"Loading model ({default_orth}) ...")
-    engine = _load_engine(default_orth)
-    print(f"Model loaded. Listening on http://0.0.0.0:{port}")
+
+    # Load every orthography up front. _load_engine() calls os.chdir(), which is
+    # process-global and would race between threads if it ran per request.
+    print(f"Loading models {ORTHOGRAPHIES} ...")
+    engines = {}
+    for _orth in ORTHOGRAPHIES:
+        print(f"  {_orth} ...")
+        engines[_orth] = _load_engine(_orth)
+
+    print(f"Models loaded ({max_workers} workers, "
+          f"{torch.get_num_threads()} torch threads each). "
+          f"Listening on http://0.0.0.0:{port}")
     print("POST /synthesize  {\"text\": \"...\", \"orth\": \"yivo_respelled\", \"speaker\": 0}")
 
     class Handler(BaseHTTPRequestHandler):
@@ -862,8 +892,9 @@ def serve(default_orth: str, default_speaker: int, port: int):
                 if speaker not in SPEAKERS:
                     raise ValueError(f"'speaker' must be 0, 1, or 2")
 
-                eng = engine if orth == default_orth else _load_engine(orth)
-                wav_bytes = _run_synthesis(eng, text, orth, speaker)
+                eng = engines[orth]
+                with synth_sem:
+                    wav_bytes = _run_synthesis(eng, text, orth, speaker)
 
                 if autoplay:
                     b64 = base64.b64encode(wav_bytes).decode("ascii")
@@ -896,8 +927,9 @@ def serve(default_orth: str, default_speaker: int, port: int):
                 self.end_headers()
                 self.wfile.write(msg)
 
-    class ReusableHTTPServer(HTTPServer):
+    class ReusableHTTPServer(ThreadingHTTPServer):
         allow_reuse_address = True
+        daemon_threads = True
 
     ReusableHTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
