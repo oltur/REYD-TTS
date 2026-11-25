@@ -198,12 +198,11 @@ def _load_lexicon(lexicon_path: str) -> dict:
     return lexicon
 
 
-def _run_synthesis(engine: dict, text: str, orth: str, speaker_id: int) -> bytes:
-    """Run inference in-process; return raw WAV bytes."""
+def _synthesize_samples(engine: dict, text: str, orth: str, speaker_id: int):
+    """Run inference in-process; return (sampling_rate, samples)."""
     import numpy as np
     import torch
-    from scipy.io import wavfile
-    from utils.tools import to_device, synth_samples
+    from utils.tools import to_device
     from text import text_to_sequence
 
     model, vocoder, configs, device = (
@@ -256,9 +255,112 @@ def _run_synthesis(engine: dict, text: str, orth: str, speaker_id: int) -> bytes
     wavs = vocoder_infer(mel_predictions, vocoder, model_config, preprocess_config, lengths=lengths)
 
     sampling_rate = preprocess_config["preprocessing"]["audio"]["sampling_rate"]
+    return sampling_rate, wavs[0]
+
+
+def _wav_bytes(sampling_rate: int, samples) -> bytes:
+    """Wrap raw samples as a WAV file in memory."""
+    from scipy.io import wavfile
     buf = io.BytesIO()
-    wavfile.write(buf, sampling_rate, wavs[0])
+    wavfile.write(buf, sampling_rate, samples)
     return buf.getvalue()
+
+
+def _run_synthesis(engine: dict, text: str, orth: str, speaker_id: int) -> bytes:
+    """Synthesise one utterance; return raw WAV bytes."""
+    sampling_rate, samples = _synthesize_samples(engine, text, orth, speaker_id)
+    return _wav_bytes(sampling_rate, samples)
+
+
+# ── long-text chunking ─────────────────────────────────────────────────────────
+#
+# Synthesis cost is linear in length and a single utterance uses one worker, so
+# a long text left the other workers idle (~53s for a 3300-character song on a
+# 3-worker box). Splitting at sentence boundaries lets the workers share it.
+
+CHUNK_MIN_CHARS = int(os.environ.get("REYD_CHUNK_MIN", 300))
+CHUNK_TARGET_CHARS = int(os.environ.get("REYD_CHUNK_TARGET", 240))
+# preprocess_text() strips trailing punctuation, so a chunk no longer carries the
+# sentence-final mark the model would have turned into a pause. Measured against
+# single-pass output, each boundary was losing ~0.97s of silence, so re-insert a
+# comparable gap rather than a token one.
+CHUNK_GAP_SECONDS = float(os.environ.get("REYD_CHUNK_GAP", 0.9))
+
+# Sentence/clause ends, plus blank lines. Includes the Hebrew sof pasuq (׃) and
+# the geresh-free ellipsis, which show up in song texts.
+_CHUNK_SPLIT = re.compile(r"(?<=[.!?…׃])\s+|\n+")
+
+
+def split_into_chunks(text: str, target: int = CHUNK_TARGET_CHARS) -> list:
+    """Split text into order-preserving chunks on sentence/line boundaries.
+
+    Never splits mid-sentence, so prosody within a sentence is untouched. A
+    single sentence longer than 2x target is split on whitespace as a fallback,
+    so one run-on paragraph cannot defeat chunking entirely.
+    """
+    pieces = [p.strip() for p in _CHUNK_SPLIT.split(text) if p and p.strip()]
+
+    expanded = []
+    for p in pieces:
+        if len(p) <= 2 * target:
+            expanded.append(p)
+            continue
+        words, cur = p.split(), ""
+        for w in words:
+            if cur and len(cur) + len(w) + 1 > target:
+                expanded.append(cur)
+                cur = w
+            else:
+                cur = f"{cur} {w}".strip()
+        if cur:
+            expanded.append(cur)
+
+    chunks, cur = [], ""
+    for p in expanded:
+        if cur and len(cur) + len(p) + 1 > target:
+            chunks.append(cur)
+            cur = p
+        else:
+            cur = f"{cur} {p}".strip()
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def _synthesize_chunked(engine: dict, text: str, orth: str, speaker_id: int,
+                        sem, max_parallel: int) -> bytes:
+    """Synthesise a long text as parallel chunks joined by short silences.
+
+    Each chunk takes the semaphore on its own, and max_parallel is deliberately
+    below the worker count so at least one slot stays free for short requests.
+    Per-chunk acquisition alone is not enough: threading.Semaphore is not FIFO,
+    so a chunked request whose pool threads immediately re-acquire will win the
+    race nearly every time. Measured with all slots available to one long
+    request, a short request queued behind it took 14s instead of 0.6s.
+    """
+    import numpy as np
+    from concurrent.futures import ThreadPoolExecutor
+
+    chunks = split_into_chunks(text)
+    if len(chunks) < 2:
+        with sem:
+            return _run_synthesis(engine, text, orth, speaker_id)
+
+    def one(chunk):
+        with sem:
+            return _synthesize_samples(engine, chunk, orth, speaker_id)
+
+    with ThreadPoolExecutor(max_workers=min(len(chunks), max_parallel)) as pool:
+        results = list(pool.map(one, chunks))   # map preserves input order
+
+    sampling_rate = results[0][0]
+    gap = np.zeros(int(sampling_rate * CHUNK_GAP_SECONDS), dtype=results[0][1].dtype)
+    joined = []
+    for i, (_, samples) in enumerate(results):
+        if i:
+            joined.append(gap)
+        joined.append(samples)
+    return _wav_bytes(sampling_rate, np.concatenate(joined))
 
 
 def ensure_textgrids(orth):
@@ -878,6 +980,9 @@ def serve(default_orth: str, default_speaker: int, port: int):
         "REYD_TORCH_THREADS", max(1, ncpu // max_workers))))
     torch.set_num_threads(torch_threads)
     synth_sem = threading.Semaphore(max_workers)
+    # Keep a slot free for interactive requests while a long text is chunking.
+    chunk_parallel = max(1, int(os.environ.get(
+        "REYD_CHUNK_PARALLEL", max(1, max_workers - 1))))
 
     _widen_regex_cache()
     ensure_textgrids(default_orth)
@@ -897,7 +1002,8 @@ def serve(default_orth: str, default_speaker: int, port: int):
         preprocess_text("אַ גוטן טאָג", _orth)
 
     print(f"Models loaded ({max_workers} workers, "
-          f"{torch.get_num_threads()} torch threads each). "
+          f"{torch.get_num_threads()} torch threads each, "
+          f"{chunk_parallel} parallel per long request). "
           f"Listening on http://0.0.0.0:{port}")
     print("POST /synthesize  {\"text\": \"...\", \"orth\": \"yivo_respelled\", \"speaker\": 0}")
 
@@ -989,16 +1095,23 @@ def serve(default_orth: str, default_speaker: int, port: int):
                 if wav_bytes is None:
                     cache_state = "MISS"
                     eng = engines[orth]
-                    with synth_sem:
-                        # Another thread may have synthesised this while we
-                        # waited for a slot.
-                        wav_bytes = _cache_get(key)
-                        if wav_bytes is None:
-                            cache_state = "MISS"
-                            wav_bytes = _run_synthesis(eng, text, orth, speaker)
-                            _cache_put(key, wav_bytes)
-                        else:
-                            cache_state = "HIT"
+                    if len(text) >= CHUNK_MIN_CHARS:
+                        # Spread it over the workers. Not inside `with
+                        # synth_sem` -- each chunk takes a slot on its own.
+                        wav_bytes = _synthesize_chunked(
+                            eng, text, orth, speaker, synth_sem, chunk_parallel)
+                    else:
+                        with synth_sem:
+                            # Another thread may have synthesised this while we
+                            # waited for a slot.
+                            wav_bytes = _cache_get(key)
+                            if wav_bytes is None:
+                                wav_bytes = _run_synthesis(eng, text, orth, speaker)
+                            else:
+                                cache_state = "HIT"
+                    if cache_state == "MISS":
+                        _cache_put(key, wav_bytes)
+
 
                 if autoplay:
                     b64 = base64.b64encode(wav_bytes).decode("ascii")
