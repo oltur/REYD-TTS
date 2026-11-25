@@ -245,14 +245,16 @@ def _synthesize_samples(engine: dict, text: str, orth: str, speaker_id: int):
     batch     = (ids, raw_texts, speakers, texts, text_lens, max(text_lens))
     batch     = to_device(batch, device)
 
-    with torch.no_grad():
-        output = model(*(batch[2:]), p_control=1.0, e_control=1.0, d_control=1.0)
-
-    # Run vocoder and capture WAV in memory
+    # One explicit no-grad scope over both stages. Not a speedup: vocoder_infer
+    # already wraps itself in no_grad (FastSpeech2/utils/model.py), so measured
+    # A/B against the previous form was 0.998x. Kept for the clearer scope.
     from utils.model import vocoder_infer
-    mel_predictions = output[1].transpose(1, 2)
-    lengths = output[9] * preprocess_config["preprocessing"]["stft"]["hop_length"]
-    wavs = vocoder_infer(mel_predictions, vocoder, model_config, preprocess_config, lengths=lengths)
+    with torch.inference_mode():
+        output = model(*(batch[2:]), p_control=1.0, e_control=1.0, d_control=1.0)
+        mel_predictions = output[1].transpose(1, 2)
+        lengths = output[9] * preprocess_config["preprocessing"]["stft"]["hop_length"]
+        wavs = vocoder_infer(mel_predictions, vocoder, model_config,
+                             preprocess_config, lengths=lengths)
 
     sampling_rate = preprocess_config["preprocessing"]["audio"]["sampling_rate"]
     return sampling_rate, wavs[0]
@@ -283,8 +285,22 @@ CHUNK_TARGET_CHARS = int(os.environ.get("REYD_CHUNK_TARGET", 240))
 # preprocess_text() strips trailing punctuation, so a chunk no longer carries the
 # sentence-final mark the model would have turned into a pause. Measured against
 # single-pass output, each boundary was losing ~0.97s of silence, so re-insert a
-# comparable gap rather than a token one.
+# comparable gap rather than a token one -- scaled by what actually ended the
+# chunk, since a comma and a full stop are not the same pause.
 CHUNK_GAP_SECONDS = float(os.environ.get("REYD_CHUNK_GAP", 0.9))
+
+_SENTENCE_END = ".!?…׃"
+_CLAUSE_END = ",;:-־"
+
+
+def _gap_after(chunk: str) -> float:
+    """Silence to follow a chunk, based on the punctuation it ends with."""
+    tail = chunk.rstrip()[-1:] if chunk.rstrip() else ""
+    if tail in _SENTENCE_END:
+        return CHUNK_GAP_SECONDS
+    if tail in _CLAUSE_END:
+        return CHUNK_GAP_SECONDS * 0.5
+    return CHUNK_GAP_SECONDS * 0.35      # a bare line break or a forced split
 
 # Sentence/clause ends, plus blank lines. Includes the Hebrew sof pasuq (׃) and
 # the geresh-free ellipsis, which show up in song texts.
@@ -354,11 +370,14 @@ def _synthesize_chunked(engine: dict, text: str, orth: str, speaker_id: int,
         results = list(pool.map(one, chunks))   # map preserves input order
 
     sampling_rate = results[0][0]
-    gap = np.zeros(int(sampling_rate * CHUNK_GAP_SECONDS), dtype=results[0][1].dtype)
+    dtype = results[0][1].dtype
     joined = []
     for i, (_, samples) in enumerate(results):
         if i:
-            joined.append(gap)
+            # The gap belongs to the punctuation that ended the *previous*
+            # chunk, which is what the model would have paused for.
+            seconds = _gap_after(chunks[i - 1])
+            joined.append(np.zeros(int(sampling_rate * seconds), dtype=dtype))
         joined.append(samples)
     return _wav_bytes(sampling_rate, np.concatenate(joined))
 
