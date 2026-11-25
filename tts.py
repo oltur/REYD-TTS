@@ -120,6 +120,25 @@ def setup():
 
 # ── text preprocessing ─────────────────────────────────────────────────────────
 
+def _widen_regex_cache():
+    """Stop the `yiddish` package thrashing Python's regex cache.
+
+    respell_loshn_koydesh() builds a few hundred distinct patterns per call (one
+    per loshn-koydesh key) and re caches only 512 compiled patterns, so each call
+    evicts the previous call's set and recompiles all of it — ~1.3s per request,
+    which dwarfed the ~0.24s of actual inference. The patterns depend only on the
+    key list, never on the input, so once the cache is wide enough to hold them
+    every later call reuses them: measured ~100x faster on unseen texts.
+
+    re._MAXCACHE is private, hence the guard.
+    """
+    try:
+        if re._MAXCACHE < 20_000:
+            re._MAXCACHE = 20_000
+    except Exception:
+        pass
+
+
 def preprocess_text(text: str, orth: str) -> str:
     try:
         import yiddish
@@ -799,10 +818,20 @@ def serve(default_orth: str, default_speaker: int, port: int):
     # once and how many CPU threads each one may use. Letting torch fan out over
     # every core per request just oversubscribes the box once more than one user
     # shows up.
-    max_workers = max(1, min(4, (os.cpu_count() or 4) // 4))
-    torch.set_num_threads(max(1, (os.cpu_count() or 4) // max_workers))
+    # Tunable because the best split is hardware-dependent: more workers with
+    # fewer threads each raises throughput, fewer workers with more threads each
+    # lowers single-user latency. Oversubscribing is much worse than either (on
+    # 22 CPUs, one synthesis at 22 torch threads takes 4.0s vs 0.53s at 5).
+    # Measured on 22 CPUs, wall clock for 3 simultaneous users: 3x7 = 1.24-1.42s,
+    # 4x5 = 1.44-1.49s, 7x3 = 1.56-1.69s. Wider splits win only past ~10 users.
+    ncpu = os.cpu_count() or 4
+    max_workers = max(1, int(os.environ.get("REYD_WORKERS", min(3, ncpu // 4))))
+    torch_threads = max(1, int(os.environ.get(
+        "REYD_TORCH_THREADS", max(1, ncpu // max_workers))))
+    torch.set_num_threads(torch_threads)
     synth_sem = threading.Semaphore(max_workers)
 
+    _widen_regex_cache()
     ensure_textgrids(default_orth)
 
     # Load every orthography up front. _load_engine() calls os.chdir(), which is
@@ -812,6 +841,12 @@ def serve(default_orth: str, default_speaker: int, port: int):
     for _orth in ORTHOGRAPHIES:
         print(f"  {_orth} ...")
         engines[_orth] = _load_engine(_orth)
+
+    # Compile the text-preprocessing patterns now, while still single-threaded,
+    # so the first user through the door doesn't pay for it.
+    print("Warming text preprocessing ...")
+    for _orth in ORTHOGRAPHIES:
+        preprocess_text("אַ גוטן טאָג", _orth)
 
     print(f"Models loaded ({max_workers} workers, "
           f"{torch.get_num_threads()} torch threads each). "
@@ -972,6 +1007,7 @@ def study(lines: list, orth: str, speaker_id: int, show_for: float, interval: fl
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
+    _widen_regex_cache()
     parser = argparse.ArgumentParser(
         description="REYD Yiddish TTS",
         formatter_class=argparse.RawDescriptionHelpFormatter,
