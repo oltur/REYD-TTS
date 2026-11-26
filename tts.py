@@ -876,6 +876,8 @@ document.getElementById('text').addEventListener('keydown', e => {
   if (e.ctrlKey && e.key === 'Enter') synthesize();
 });
 </script>
+<!-- Cloudflare Web Analytics (site token is public by design) -->
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "694984e78d584e5eb06225bf6ded1c0e"}'></script>
 </body>
 </html>"""
 
