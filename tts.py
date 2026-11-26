@@ -494,7 +494,25 @@ UI_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>רייד — ייִדיש טעקסט-צו-רעדן</title>
+<title>רייד — ייִדיש טעקסט-צו-רעדן | Yiddish Text-to-Speech</title>
+<meta name="description" content="Free Yiddish text-to-speech. Type or paste Yiddish and hear it spoken aloud — three voices, three orthographies (YIVO and Hasidic), no sign-up. Built on the REYD-TTS FastSpeech2 models.">
+<link rel="canonical" href="__PUBLIC_URL__/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="REYD — Yiddish Text-to-Speech">
+<meta property="og:title" content="רייד — Yiddish Text-to-Speech">
+<meta property="og:description" content="Type or paste Yiddish and hear it spoken aloud. Three voices, three orthographies, free and open source.">
+<meta property="og:url" content="__PUBLIC_URL__/">
+<meta property="og:image" content="__PUBLIC_URL__/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="REYD — Yiddish Text-to-Speech">
+<meta property="og:locale" content="yi_001">
+<meta property="og:locale:alternate" content="en_US">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="רייד — Yiddish Text-to-Speech">
+<meta name="twitter:description" content="Type or paste Yiddish and hear it spoken aloud. Three voices, three orthographies, free and open source.">
+<meta name="twitter:image" content="__PUBLIC_URL__/og.png">
+<meta name="twitter:image:alt" content="REYD — Yiddish Text-to-Speech">
 <link rel="icon" type="image/svg+xml" href="__FAVICON_HREF__">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=Frank+Ruhl+Libre:wght@400;700&display=swap');
@@ -861,7 +879,15 @@ document.getElementById('text').addEventListener('keydown', e => {
 </body>
 </html>"""
 
+# Absolute URL for the social-card tags: og:image and canonical are not allowed
+# to be relative, so the public origin has to be baked in. Override when serving
+# from somewhere else.
+PUBLIC_URL = os.environ.get(
+    "REYD_PUBLIC_URL", "https://yiddish-tts.turevskiy.kharkiv.ua").rstrip("/")
+OG_IMAGE_PATH = ROOT / "og.png"
+
 UI_HTML = UI_HTML.replace("__FAVICON_HREF__", FAVICON_DATA_URI)
+UI_HTML = UI_HTML.replace("__PUBLIC_URL__", PUBLIC_URL)
 
 
 # ── API docs (Swagger/OpenAPI) ───────────────────────────────────────────────────
@@ -1044,6 +1070,12 @@ def serve(default_orth: str, default_speaker: int, port: int):
         "REYD_CHUNK_PARALLEL", max(1, max_workers - 1))))
 
     _widen_regex_cache()
+
+    # Read the social-card image before _load_engine() chdir()s into FastSpeech2.
+    og_image = OG_IMAGE_PATH.read_bytes() if OG_IMAGE_PATH.is_file() else None
+    if og_image is None:
+        print(f"  note: {OG_IMAGE_PATH.name} missing; /og.png will 404")
+
     ensure_textgrids(default_orth)
 
     # Load every orthography up front. _load_engine() calls os.chdir(), which is
@@ -1087,6 +1119,17 @@ def serve(default_orth: str, default_speaker: int, port: int):
                 self.send_header("Content-Length", len(body))
                 self.end_headers()
                 self.wfile.write(body)
+            elif path == "/og.png":
+                if og_image is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", len(og_image))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(og_image)
+
             elif path == "/favicon.ico":
                 body = FAVICON_SVG.encode("utf-8")
                 self.send_response(200)
