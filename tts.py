@@ -787,8 +787,19 @@ UI_HTML = """<!DOCTYPE html>
 </main>
 
 <footer>
-  REYD &mdash; Reading Electronic Yiddish Documents &middot; <a href="/swagger" style="color:inherit;">API docs</a><br>
-  &copy; 2026 Oleksandr Turevskiy &middot; <a href="https://turevskiy.com" style="color:inherit;">turevskiy.com</a>
+  Speech produced by the <a href="https://github.com/REYD-TTS" style="color:inherit;">REYD</a>
+  (Reading Electronic Yiddish Documents) models of
+  Jacob&nbsp;J.&nbsp;Webber, Isaac&nbsp;L.&nbsp;Bleaman, Samuel&nbsp;K.&nbsp;Lo and Simon&nbsp;King.<br>
+  Corpus: <a href="https://doi.org/10.7488/ds/3424" style="color:inherit;">REYD Yiddish TTS Corpus</a> (CSTR, University of Edinburgh, 2022) &middot;
+  paper: <a href="https://doi.org/10.21437/Interspeech.2022-789" style="color:inherit;">Interspeech&nbsp;2022</a> &middot;
+  vocoder: <a href="https://github.com/jik876/hifi-gan" style="color:inherit;">HiFi-GAN</a><br>
+  Recorded at the Montreal Jewish Public Library and the University of Haifa;
+  made public with the permission of the readers&rsquo; families.<br>
+  <br>
+  This interface &copy; 2026 Oleksandr Turevskiy &middot;
+  <a href="https://turevskiy.com" style="color:inherit;">turevskiy.com</a> &middot;
+  <a href="https://github.com/oltur/REYD-TTS" style="color:inherit;">source</a> &middot;
+  <a href="/swagger" style="color:inherit;">API docs</a>
 </footer>
 
 <script>

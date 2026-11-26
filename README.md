@@ -82,9 +82,31 @@ The script installs Python (upgrading to 3.10 if needed), creates a systemd serv
 
 ## Credits
 
-- Models: [REYD-TTS](https://github.com/REYD-TTS) by Jacob J. Webber, Samuel Lo, Isaac L. Bleaman
+All of the speech here comes from the [REYD](https://github.com/REYD-TTS) project — Reading
+Electronic Yiddish Documents — which built the first Yiddish text-to-speech dataset and system
+and released the whole thing publicly. This repository is only an interface to their work.
+
+**System and paper**
+
+> Jacob J. Webber, Samuel K. Lo and Isaac L. Bleaman. *REYD — The First Yiddish Text-to-Speech
+> Dataset and System.* Proceedings of Interspeech 2022, pp. 2363–2367.
+> [doi:10.21437/Interspeech.2022-789](https://doi.org/10.21437/Interspeech.2022-789)
+
+**Corpus**
+
+> Webber, Jacob; Bleaman, Isaac; Lo, Samuel; King, Simon. (2022). *REYD Yiddish TTS Corpus*
+> [dataset]. Centre for Speech Technology Research (CSTR), University of Edinburgh.
+> [doi:10.7488/ds/3424](https://doi.org/10.7488/ds/3424)
+
+The corpus was recorded at the Montreal Jewish Public Library and the University of Haifa. Its
+source texts and audio are in the public domain, and it was made public with the permission of
+the surviving relatives of the three readers.
+
+**Also**
+
+- Text preprocessing: the [`yiddish`](https://pypi.org/project/yiddish/) library by Isaac L. Bleaman
 - Vocoder: [HiFi-GAN](https://github.com/jik876/hifi-gan)
-- Dataset: University of Edinburgh DataShare ([19350539](https://figshare.com/articles/dataset/19350539))
+- Base implementation: [FastSpeech2](https://github.com/ming024/FastSpeech2) by Chung-Ming Chien (MIT)
 
 ## License
 
