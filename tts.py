@@ -918,7 +918,7 @@ OPENAPI_SPEC = {
                         },
                     },
                     "400": {"description": "Invalid request (missing/invalid text, orth, or speaker)"},
-                    "413": {"description": "Text exceeds the per-request character limit"},
+                    "413": {"description": "Text exceeds the per-request character limit, or the body exceeds the byte limit"},
                 },
             },
             "post": {
@@ -937,7 +937,7 @@ OPENAPI_SPEC = {
                         },
                     },
                     "400": {"description": "Invalid request (missing/invalid text, orth, or speaker)"},
-                    "413": {"description": "Text exceeds the per-request character limit"},
+                    "413": {"description": "Text exceeds the per-request character limit, or the body exceeds the byte limit"},
                 },
             },
         },
@@ -980,6 +980,11 @@ class TextTooLong(Exception):
 
 
 MAX_TEXT_CHARS = int(os.environ.get("REYD_MAX_CHARS", 4096))
+
+# Hard ceiling on a POST body, checked against Content-Length *before* any of it
+# is read. Yiddish is 2 bytes per character in UTF-8 and combining marks count
+# as characters in their own right, so 4x the character limit is ample headroom.
+MAX_BODY_BYTES = int(os.environ.get("REYD_MAX_BODY_BYTES", MAX_TEXT_CHARS * 4 + 1024))
 CACHE_MAX_BYTES = int(os.environ.get("REYD_CACHE_BYTES", 64 * 1024 * 1024))
 
 _cache = OrderedDict()
@@ -1109,17 +1114,51 @@ def serve(default_orth: str, default_speaker: int, port: int):
             else:
                 self.send_error(404)
 
+        def _send_json(self, code, payload, close=False):
+            msg = json.dumps(payload).encode()
+            if close:
+                self.close_connection = True
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(msg))
+            if close:
+                self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(msg)
+
         def do_POST(self):
             path, _, query = self.path.partition("?")
             if path.rstrip("/") != "/synthesize":
                 self.send_error(404)
                 return
             qs = {k: v[0] for k, v in parse_qs(query).items()}
-            length = int(self.headers.get("Content-Length", 0))
+            try:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                self._send_json(400, {"error": "invalid Content-Length"}, close=True)
+                return
+            if length < 0:
+                self._send_json(400, {"error": "invalid Content-Length"}, close=True)
+                return
+            if length > MAX_BODY_BYTES:
+                # Refused before reading a single byte. Content-Length is
+                # attacker-controlled, so buffering the body first would let one
+                # request exhaust memory regardless of the character limit below.
+                # The body is left unread, so the connection must close -- a
+                # keep-alive stream would otherwise resume mid-body.
+                self._send_json(413, {
+                    "error": f"request body is {length} bytes; the limit is "
+                             f"{MAX_BODY_BYTES}"
+                }, close=True)
+                return
+            body = self.rfile.read(length) if length else b""
             if length and "text" not in qs:
-                qs["text"] = self.rfile.read(length).decode("utf-8")
-            elif length:
-                self.rfile.read(length)  # drain body even if text came from the query string
+                try:
+                    qs["text"] = body.decode("utf-8")
+                except UnicodeDecodeError:
+                    self._send_json(400, {"error": "request body must be UTF-8"},
+                                    close=True)
+                    return
             self._synthesize(qs)
 
         def _synthesize(self, qs):
